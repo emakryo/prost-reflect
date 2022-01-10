@@ -119,9 +119,9 @@ where
     Ok(())
 }
 
-struct ValueAndKind<'a> {
+struct ValueAndKind<'a, I> {
     value: &'a Value,
-    kind: &'a Kind,
+    kind: &'a Kind<I>,
 }
 
 impl<'a> Serialize for SerializeWrapper<'a, ValueAndKind<'a>> {

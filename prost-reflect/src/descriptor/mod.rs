@@ -11,7 +11,7 @@ pub use self::{
     },
 };
 
-use std::{fmt, sync::Arc};
+use std::{borrow::Borrow, fmt, ptr, sync::Arc};
 
 use prost::{bytes::Buf, Message};
 use prost_types::FileDescriptorSet;
@@ -26,12 +26,14 @@ pub(crate) const MAP_ENTRY_VALUE_NUMBER: u32 = 2;
 ///
 /// This type is immutable once constructed, and uses reference counting internally so it is
 /// cheap to clone.
-#[derive(Clone)]
-pub struct FileDescriptor {
-    inner: Arc<FileDescriptorInner>,
+#[derive(Copy, Clone)]
+pub struct FileDescriptor<I = Arc<FileDescriptorInner>> {
+    inner: I,
 }
 
-struct FileDescriptorInner {
+#[doc(hidden)]
+#[allow(missing_debug_implementations)]
+pub struct FileDescriptorInner {
     raw: FileDescriptorSet,
     type_map: ty::TypeMap,
     services: Box<[ServiceDescriptorInner]>,
@@ -50,7 +52,7 @@ impl FileDescriptor {
     /// the protobuf compiler, these error cases should never occur since it performs its own
     /// validation.
     pub fn new(file_descriptor_set: FileDescriptorSet) -> Result<Self, DescriptorError> {
-        let inner = FileDescriptor::from_raw(file_descriptor_set)?;
+        let inner = FileDescriptorInner::from_raw(file_descriptor_set)?;
         Ok(FileDescriptor {
             inner: Arc::new(inner),
         })
@@ -67,7 +69,63 @@ impl FileDescriptor {
                 .map_err(DescriptorError::decode_file_descriptor_set)?,
         )
     }
+}
 
+impl<I> FileDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner> + Clone,
+{
+    /// Gets a reference to the [`FileDescriptorSet`] wrapped by this [`FileDescriptor`].
+    pub fn file_descriptor_set(&self) -> &FileDescriptorSet {
+        &self.inner.borrow().raw
+    }
+
+    /// Gets an iterator over the services defined in these protobuf files.
+    pub fn services(&self) -> impl ExactSizeIterator<Item = ServiceDescriptor<I>> {
+        let this = self.clone();
+        (0..self.inner.borrow().services.len())
+            .map(move |index| ServiceDescriptor::new(this.clone(), index))
+    }
+
+    /// Gets an iterator over all messages defined in these protobuf files.
+    ///
+    /// The iterator includes nested messages defined in another message.
+    pub fn all_messages(&self) -> impl ExactSizeIterator<Item = MessageDescriptor<I>> {
+        MessageDescriptor::iter(self.clone())
+    }
+
+    /// Gets an iterator over all enums defined in these protobuf files.
+    ///
+    /// The iterator includes nested enums defined in another message.
+    pub fn all_enums(&self) -> impl ExactSizeIterator<Item = EnumDescriptor<I>> {
+        EnumDescriptor::iter(self.clone())
+    }
+
+    /// Gets an iterator over all extension fields defined in these protobuf files.
+    ///
+    /// The iterator includes nested extensions fields defined in another message.
+    pub fn all_extensions(&self) -> impl ExactSizeIterator<Item = ExtensionDescriptor<I>> {
+        ExtensionDescriptor::iter(self.clone())
+    }
+
+    /// Gets a [`MessageDescriptor`] by its fully qualified name, for example `my.package.MessageName`.
+    pub fn get_message_by_name(&self, name: &str) -> Option<MessageDescriptor<I>> {
+        MessageDescriptor::try_get_by_name(self, name)
+    }
+
+    /// Gets an [`EnumDescriptor`] by its fully qualified name, for example `my.package.EnumName`.
+    pub fn get_enum_by_name(&self, name: &str) -> Option<EnumDescriptor<I>> {
+        EnumDescriptor::try_get_by_name(self, name)
+    }
+
+    pub fn borrow(&self) -> FileDescriptor<&'_ FileDescriptorInner> {
+        FileDescriptor {
+            inner: self.inner.borrow(),
+        }
+    }
+}
+
+impl FileDescriptorInner {
     fn from_raw(raw: FileDescriptorSet) -> Result<FileDescriptorInner, DescriptorError> {
         let mut type_map = ty::TypeMap::new();
         type_map.add_files(&raw)?;
@@ -90,50 +148,12 @@ impl FileDescriptor {
             services,
         })
     }
-
-    /// Gets a reference to the [`FileDescriptorSet`] wrapped by this [`FileDescriptor`].
-    pub fn file_descriptor_set(&self) -> &FileDescriptorSet {
-        &self.inner.raw
-    }
-
-    /// Gets an iterator over the services defined in these protobuf files.
-    pub fn services(&self) -> impl ExactSizeIterator<Item = ServiceDescriptor> + '_ {
-        (0..self.inner.services.len()).map(move |index| ServiceDescriptor::new(self.clone(), index))
-    }
-
-    /// Gets an iterator over all messages defined in these protobuf files.
-    ///
-    /// The iterator includes nested messages defined in another message.
-    pub fn all_messages(&self) -> impl ExactSizeIterator<Item = MessageDescriptor> + '_ {
-        MessageDescriptor::iter(self)
-    }
-
-    /// Gets an iterator over all enums defined in these protobuf files.
-    ///
-    /// The iterator includes nested enums defined in another message.
-    pub fn all_enums(&self) -> impl ExactSizeIterator<Item = EnumDescriptor> + '_ {
-        EnumDescriptor::iter(self)
-    }
-
-    /// Gets an iterator over all extension fields defined in these protobuf files.
-    ///
-    /// The iterator includes nested extensions fields defined in another message.
-    pub fn all_extensions(&self) -> impl ExactSizeIterator<Item = ExtensionDescriptor> + '_ {
-        ExtensionDescriptor::iter(self)
-    }
-
-    /// Gets a [`MessageDescriptor`] by its fully qualified name, for example `my.package.MessageName`.
-    pub fn get_message_by_name(&self, name: &str) -> Option<MessageDescriptor> {
-        MessageDescriptor::try_get_by_name(self, name)
-    }
-
-    /// Gets an [`EnumDescriptor`] by its fully qualified name, for example `my.package.EnumName`.
-    pub fn get_enum_by_name(&self, name: &str) -> Option<EnumDescriptor> {
-        EnumDescriptor::try_get_by_name(self, name)
-    }
 }
 
-impl fmt::Debug for FileDescriptor {
+impl<I> fmt::Debug for FileDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner> + Clone,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FileDescriptor")
             .field("services", &debug_fmt_iter(self.services()))
@@ -144,9 +164,12 @@ impl fmt::Debug for FileDescriptor {
     }
 }
 
-impl PartialEq for FileDescriptor {
+impl<I> PartialEq for FileDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner>,
+{
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.inner, &other.inner)
+        ptr::eq(self.inner.borrow(), other.inner.borrow())
     }
 }
 

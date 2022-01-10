@@ -6,6 +6,7 @@ use prost::encoding::WireType;
 use prost_types::field_descriptor_proto;
 
 use std::{
+    borrow::Borrow,
     collections::{
         hash_map::{self, HashMap},
         BTreeMap,
@@ -13,11 +14,12 @@ use std::{
     convert::TryInto,
     fmt,
     ops::{Range, RangeInclusive},
+    sync::Arc,
 };
 
 use crate::descriptor::{
     debug_fmt_iter, make_full_name, parse_name, parse_namespace, DescriptorError, FileDescriptor,
-    MAP_ENTRY_KEY_NUMBER, MAP_ENTRY_VALUE_NUMBER,
+    FileDescriptorInner, MAP_ENTRY_KEY_NUMBER, MAP_ENTRY_VALUE_NUMBER,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -31,9 +33,9 @@ pub(super) struct TypeMap {
 }
 
 /// A protobuf message definition.
-#[derive(Clone, PartialEq, Eq)]
-pub struct MessageDescriptor {
-    file_set: FileDescriptor,
+#[derive(Clone)]
+pub struct MessageDescriptor<I = Arc<FileDescriptorInner>> {
+    file: FileDescriptor<I>,
     ty: TypeId,
 }
 
@@ -52,9 +54,9 @@ struct MessageDescriptorInner {
 }
 
 /// A oneof field in a protobuf message.
-#[derive(Clone, PartialEq, Eq)]
-pub struct OneofDescriptor {
-    message: MessageDescriptor,
+#[derive(Clone)]
+pub struct OneofDescriptor<I = Arc<FileDescriptorInner>> {
+    message: MessageDescriptor<I>,
     index: usize,
 }
 
@@ -65,9 +67,9 @@ struct OneofDescriptorInner {
 }
 
 /// A protobuf message definition.
-#[derive(Clone, PartialEq, Eq)]
-pub struct FieldDescriptor {
-    message: MessageDescriptor,
+#[derive(Clone)]
+pub struct FieldDescriptor<I = Arc<FileDescriptorInner>> {
+    message: MessageDescriptor<I>,
     field: u32,
 }
 
@@ -85,9 +87,9 @@ struct FieldDescriptorInner {
 }
 
 /// A protobuf extension field definition.
-#[derive(Clone, PartialEq, Eq)]
-pub struct ExtensionDescriptor {
-    file_set: FileDescriptor,
+#[derive(Clone)]
+pub struct ExtensionDescriptor<I = Arc<FileDescriptorInner>> {
+    file: FileDescriptor<I>,
     index: usize,
 }
 
@@ -100,9 +102,9 @@ pub struct ExtensionDescriptorInner {
 }
 
 /// A protobuf enum type.
-#[derive(Clone, PartialEq, Eq)]
-pub struct EnumDescriptor {
-    file_set: FileDescriptor,
+#[derive(Clone)]
+pub struct EnumDescriptor<I = Arc<FileDescriptorInner>> {
+    file: FileDescriptor<I>,
     ty: TypeId,
 }
 
@@ -117,9 +119,9 @@ struct EnumDescriptorInner {
 }
 
 /// A value in a protobuf enum type.
-#[derive(Clone, PartialEq, Eq)]
-pub struct EnumValueDescriptor {
-    parent: EnumDescriptor,
+#[derive(Clone)]
+pub struct EnumValueDescriptor<I = Arc<FileDescriptorInner>> {
+    parent: EnumDescriptor<I>,
     number: i32,
 }
 
@@ -129,8 +131,8 @@ struct EnumValueDescriptorInner {
 }
 
 /// The type of a protobuf message field.
-#[derive(Clone, PartialEq, Eq)]
-pub enum Kind {
+#[derive(Clone)]
+pub enum Kind<I> {
     /// The protobuf `double` type.
     Double,
     /// The protobuf `float` type.
@@ -162,9 +164,9 @@ pub enum Kind {
     /// The protobuf `bytes` type.
     Bytes,
     /// A protobuf message type.
-    Message(MessageDescriptor),
+    Message(MessageDescriptor<I>),
     /// A protobuf enum type.
-    Enum(EnumDescriptor),
+    Enum(EnumDescriptor<I>),
 }
 
 /// Cardinality determines whether a field is optional, required, or repeated.
@@ -178,47 +180,51 @@ pub enum Cardinality {
     Repeated,
 }
 
-impl MessageDescriptor {
-    pub(in crate::descriptor) fn new(file_set: FileDescriptor, ty: TypeId) -> Self {
-        MessageDescriptor { file_set, ty }
+impl<I> MessageDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner> + Clone,
+{
+    pub(in crate::descriptor) fn new(file_set: FileDescriptor<I>, ty: TypeId) -> Self {
+        MessageDescriptor { file: file_set, ty }
     }
 
     pub(in crate::descriptor) fn iter(
-        file_set: &FileDescriptor,
-    ) -> impl ExactSizeIterator<Item = Self> + '_ {
+        file_set: FileDescriptor<I>,
+    ) -> impl ExactSizeIterator<Item = Self> {
         file_set
             .inner
+            .borrow()
             .type_map
             .messages()
             .map(move |ty| MessageDescriptor {
-                file_set: file_set.clone(),
+                file: file_set.clone(),
                 ty,
             })
     }
 
     pub(in crate::descriptor) fn try_get_by_name(
-        file_set: &FileDescriptor,
+        file_set: &FileDescriptor<I>,
         name: &str,
     ) -> Option<Self> {
-        let ty = file_set.inner.type_map.get_by_name(name)?;
+        let ty = file_set.inner.borrow().type_map.get_by_name(name)?;
         if !ty.is_message() {
             return None;
         }
         Some(MessageDescriptor {
-            file_set: file_set.clone(),
+            file: file_set.clone(),
             ty,
         })
     }
 
     /// Gets a reference to the [`FileDescriptor`] this message is defined in.
-    pub fn parent_file(&self) -> &FileDescriptor {
-        &self.file_set
+    pub fn parent_file(&self) -> &FileDescriptor<I> {
+        &self.file
     }
 
     /// Gets the parent message type if this message type is nested inside a another message, or `None` otherwise
-    pub fn parent_message(&self) -> Option<MessageDescriptor> {
+    pub fn parent_message(&self) -> Option<MessageDescriptor<I>> {
         self.message_ty().parent.map(|ty| MessageDescriptor {
-            file_set: self.file_set.clone(),
+            file: self.file.clone(),
             ty,
         })
     }
@@ -241,26 +247,28 @@ impl MessageDescriptor {
     }
 
     /// Gets an iterator yielding a [`FieldDescriptor`] for each field defined in this message.
-    pub fn fields(&self) -> impl ExactSizeIterator<Item = FieldDescriptor> + '_ {
-        self.message_ty()
+    pub fn fields(&self) -> impl ExactSizeIterator<Item = FieldDescriptor<I>> {
+        let this = self.clone();
+        this.message_ty()
             .fields
             .keys()
             .map(move |&field| FieldDescriptor {
-                message: self.clone(),
+                message: this.clone(),
                 field,
             })
     }
 
     /// Gets an iterator yielding a [`OneofDescriptor`] for each oneof field defined in this message.
-    pub fn oneofs(&self) -> impl ExactSizeIterator<Item = OneofDescriptor> + '_ {
+    pub fn oneofs(&self) -> impl ExactSizeIterator<Item = OneofDescriptor<I>> {
+        let this = self.clone();
         (0..self.message_ty().oneof_decls.len()).map(move |index| OneofDescriptor {
-            message: self.clone(),
+            message: this.clone(),
             index,
         })
     }
 
     /// Gets a [`FieldDescriptor`] with the given number, or `None` if no such field exists.
-    pub fn get_field(&self, number: u32) -> Option<FieldDescriptor> {
+    pub fn get_field(&self, number: u32) -> Option<FieldDescriptor<I>> {
         if self.message_ty().fields.contains_key(&number) {
             Some(FieldDescriptor {
                 message: self.clone(),
@@ -272,7 +280,7 @@ impl MessageDescriptor {
     }
 
     /// Gets a [`FieldDescriptor`] with the given name, or `None` if no such field exists.
-    pub fn get_field_by_name(&self, name: &str) -> Option<FieldDescriptor> {
+    pub fn get_field_by_name(&self, name: &str) -> Option<FieldDescriptor<I>> {
         self.message_ty()
             .field_names
             .get(name)
@@ -283,7 +291,7 @@ impl MessageDescriptor {
     }
 
     /// Gets a [`FieldDescriptor`] with the given JSON name, or `None` if no such field exists.
-    pub fn get_field_by_json_name(&self, json_name: &str) -> Option<FieldDescriptor> {
+    pub fn get_field_by_json_name(&self, json_name: &str) -> Option<FieldDescriptor<I>> {
         self.message_ty()
             .field_json_names
             .get(json_name)
@@ -314,7 +322,7 @@ impl MessageDescriptor {
     /// # Panics
     ///
     /// This method may panic if [`is_map_entry`][MessageDescriptor::is_map_entry] returns `false`.
-    pub fn map_entry_key_field(&self) -> FieldDescriptor {
+    pub fn map_entry_key_field(&self) -> FieldDescriptor<I> {
         debug_assert!(self.is_map_entry());
         self.get_field(MAP_ENTRY_KEY_NUMBER)
             .expect("map entry should have key field")
@@ -325,7 +333,7 @@ impl MessageDescriptor {
     /// # Panics
     ///
     /// This method may panic if [`is_map_entry`][MessageDescriptor::is_map_entry] returns `false`.
-    pub fn map_entry_value_field(&self) -> FieldDescriptor {
+    pub fn map_entry_value_field(&self) -> FieldDescriptor<I> {
         debug_assert!(self.is_map_entry());
         self.get_field(MAP_ENTRY_VALUE_NUMBER)
             .expect("map entry should have key field")
@@ -337,7 +345,7 @@ impl MessageDescriptor {
     }
 
     /// Gets an iterator over reserved field names in this message.
-    pub fn reserved_names(&self) -> impl ExactSizeIterator<Item = &str> + '_ {
+    pub fn reserved_names(&self) -> impl ExactSizeIterator<Item = &str> {
         self.message_ty().reserved_names.iter().map(Box::as_ref)
     }
 
@@ -350,40 +358,44 @@ impl MessageDescriptor {
     ///
     /// Note this iterates over extension fields defined in any file which extend this message, rather than
     /// extensions defined nested within this message.
-    pub fn extensions(&self) -> impl ExactSizeIterator<Item = ExtensionDescriptor> + '_ {
-        self.message_ty()
+    pub fn extensions(&self) -> impl ExactSizeIterator<Item = ExtensionDescriptor<I>> {
+        let this = self.clone();
+        this.message_ty()
             .extensions
             .iter()
             .map(move |&index| ExtensionDescriptor {
-                file_set: self.file_set.clone(),
+                file: this.file.clone(),
                 index,
             })
     }
 
     /// Gets an extension to this message by its number, or `None` if no such extension exists.
-    pub fn get_extension(&self, number: u32) -> Option<ExtensionDescriptor> {
+    pub fn get_extension(&self, number: u32) -> Option<ExtensionDescriptor<I>> {
         self.extensions().find(|ext| ext.number() == number)
     }
 
     /// Gets an extension to this message by its JSON name (e.g. `[my.package.my_extension]`), or `None` if no such extension exists.
-    pub fn get_extension_by_json_name(&self, name: &str) -> Option<ExtensionDescriptor> {
+    pub fn get_extension_by_json_name(&self, name: &str) -> Option<ExtensionDescriptor<I>> {
         self.extensions().find(|ext| ext.json_name() == name)
     }
 
     fn message_ty(&self) -> &MessageDescriptorInner {
-        self.file_set.inner.type_map.get_message(self.ty)
+        self.file.inner.borrow().type_map.get_message(self.ty)
     }
 
     fn root_message_ty(&self) -> &MessageDescriptorInner {
         let mut curr = self.message_ty();
         while let Some(parent) = curr.parent {
-            curr = self.file_set.inner.type_map.get_message(parent);
+            curr = self.file.inner.borrow().type_map.get_message(parent);
         }
         curr
     }
 }
 
-impl fmt::Debug for MessageDescriptor {
+impl<I> fmt::Debug for MessageDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner> + Clone,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MessageDescriptor")
             .field("name", &self.name())
@@ -395,14 +407,28 @@ impl fmt::Debug for MessageDescriptor {
     }
 }
 
-impl FieldDescriptor {
+impl<I> PartialEq for MessageDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner>,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.file == other.file && self.ty == other.ty
+    }
+}
+
+impl<I> Eq for MessageDescriptor<I> where I: Borrow<FileDescriptorInner> {}
+
+impl<I> FieldDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner> + Clone,
+{
     /// Gets a reference to the [`FileDescriptor`] this field is defined in.
-    pub fn parent_file(&self) -> &FileDescriptor {
+    pub fn parent_file(&self) -> &FileDescriptor<I> {
         self.message.parent_file()
     }
 
     /// Gets a reference to the [`MessageDescriptor`] this field is defined in.
-    pub fn parent_message(&self) -> &MessageDescriptor {
+    pub fn parent_message(&self) -> &MessageDescriptor<I> {
         &self.message
     }
 
@@ -476,13 +502,13 @@ impl FieldDescriptor {
     }
 
     /// Gets the [`Kind`] of this field.
-    pub fn kind(&self) -> Kind {
-        self.message_field_ty().ty.to_kind(&self.message.file_set)
+    pub fn kind(&self) -> Kind<I> {
+        self.message_field_ty().ty.to_kind(&self.message.file)
     }
 
     /// Gets a [`OneofDescriptor`] representing the oneof containing this field,
     /// or `None` if this field is not contained in a oneof.
-    pub fn containing_oneof(&self) -> Option<OneofDescriptor> {
+    pub fn containing_oneof(&self) -> Option<OneofDescriptor<I>> {
         self.message_field_ty()
             .oneof_index
             .map(|index| OneofDescriptor {
@@ -504,7 +530,10 @@ impl FieldDescriptor {
     }
 }
 
-impl fmt::Debug for FieldDescriptor {
+impl<I> fmt::Debug for FieldDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner> + Clone,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FieldDescriptor")
             .field("name", &self.name())
@@ -527,32 +556,47 @@ impl fmt::Debug for FieldDescriptor {
     }
 }
 
-impl ExtensionDescriptor {
+impl<I> PartialEq for FieldDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner>,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.message == other.message && self.number == other.number
+    }
+}
+
+impl<I> Eq for FieldDescriptor<I> where I: Borrow<FileDescriptorInner> {}
+
+impl<I> ExtensionDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner> + Clone,
+{
     pub(in crate::descriptor) fn iter(
-        file_set: &FileDescriptor,
-    ) -> impl ExactSizeIterator<Item = Self> + '_ {
+        file_set: FileDescriptor<I>,
+    ) -> impl ExactSizeIterator<Item = Self> {
         file_set
             .inner
+            .borrow()
             .type_map
             .extensions()
             .map(move |index| ExtensionDescriptor {
-                file_set: file_set.clone(),
+                file: file_set.clone(),
                 index,
             })
     }
 
     /// Gets a reference to the [`FileDescriptor`] this extension field is defined in.
-    pub fn parent_file(&self) -> &FileDescriptor {
-        &self.file_set
+    pub fn parent_file(&self) -> &FileDescriptor<I> {
+        &self.file
     }
 
     /// Gets the parent message type if this extension is defined within another message, or `None` otherwise.
     ///
     /// Note this just corresponds to where the extension was defined in the proto file. See [`containing_message`][ExtensionDescriptor::containing_message]
     /// for the message this field extends.
-    pub fn parent_message(&self) -> Option<MessageDescriptor> {
+    pub fn parent_message(&self) -> Option<MessageDescriptor<I>> {
         self.extension_ty().parent.map(|ty| MessageDescriptor {
-            file_set: self.file_set.clone(),
+            file: self.file.borrow(),
             ty,
         })
     }
@@ -636,14 +680,14 @@ impl ExtensionDescriptor {
     }
 
     /// Gets the [`Kind`] of this field.
-    pub fn kind(&self) -> Kind {
-        self.message_field_ty().ty.to_kind(&self.file_set)
+    pub fn kind(&self) -> Kind<I> {
+        self.message_field_ty().ty.to_kind(&self.file)
     }
 
     /// Gets the containing message that this field extends.
-    pub fn containing_message(&self) -> MessageDescriptor {
+    pub fn containing_message(&self) -> MessageDescriptor<I> {
         MessageDescriptor {
-            file_set: self.file_set.clone(),
+            file: self.file.clone(),
             ty: self.extension_ty().extendee,
         }
     }
@@ -661,13 +705,13 @@ impl ExtensionDescriptor {
     }
 
     fn extension_ty(&self) -> &ExtensionDescriptorInner {
-        self.file_set.inner.type_map.get_extension(self.index)
+        self.file.inner.type_map.get_extension(self.index)
     }
 
     fn root_message_ty(&self) -> Option<&MessageDescriptorInner> {
         match self.extension_ty().parent {
             Some(mut curr) => loop {
-                let message = self.file_set.inner.type_map.get_message(curr);
+                let message = self.file.inner.type_map.get_message(curr);
                 if let Some(parent) = message.parent {
                     curr = parent;
                 } else {
@@ -679,7 +723,10 @@ impl ExtensionDescriptor {
     }
 }
 
-impl fmt::Debug for ExtensionDescriptor {
+impl<I> fmt::Debug for ExtensionDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner> + Clone,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ExtensionDescriptor")
             .field("name", &self.name())
@@ -702,10 +749,21 @@ impl fmt::Debug for ExtensionDescriptor {
     }
 }
 
-impl Kind {
+impl<I> PartialEq for ExtensionDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner>,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.message == other.message && self.number == other.number
+    }
+}
+
+impl<I> Eq for ExtensionDescriptor<I> where I: Borrow<FileDescriptorInner> {}
+
+impl<I> Kind<I> {
     /// Gets a reference to the [`MessageDescriptor`] if this is a message type,
     /// or `None` otherwise.
-    pub fn as_message(&self) -> Option<&MessageDescriptor> {
+    pub fn as_message(&self) -> Option<&MessageDescriptor<I>> {
         match self {
             Kind::Message(desc) => Some(desc),
             _ => None,
@@ -714,7 +772,7 @@ impl Kind {
 
     /// Gets a reference to the [`EnumDescriptor`] if this is an enum type,
     /// or `None` otherwise.
-    pub fn as_enum(&self) -> Option<&EnumDescriptor> {
+    pub fn as_enum(&self) -> Option<&EnumDescriptor<I>> {
         match self {
             Kind::Enum(desc) => Some(desc),
             _ => None,
@@ -738,7 +796,7 @@ impl Kind {
     }
 }
 
-impl fmt::Debug for Kind {
+impl<I> fmt::Debug for Kind<I> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Double => write!(f, "double"),
@@ -762,43 +820,47 @@ impl fmt::Debug for Kind {
     }
 }
 
-impl EnumDescriptor {
+impl<I> EnumDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner> + Clone,
+{
     pub(in crate::descriptor) fn iter(
-        file_set: &FileDescriptor,
-    ) -> impl ExactSizeIterator<Item = Self> + '_ {
+        file_set: FileDescriptor<I>,
+    ) -> impl ExactSizeIterator<Item = Self> {
         file_set
             .inner
+            .borrow()
             .type_map
             .enums()
             .map(move |ty| EnumDescriptor {
-                file_set: file_set.clone(),
+                file: file_set.clone(),
                 ty,
             })
     }
 
     pub(in crate::descriptor) fn try_get_by_name(
-        file_set: &FileDescriptor,
+        file: &FileDescriptor<I>,
         name: &str,
     ) -> Option<Self> {
-        let ty = file_set.inner.type_map.get_by_name(name)?;
+        let ty = file.inner.borrow().type_map.get_by_name(name)?;
         if !ty.is_enum() {
             return None;
         }
         Some(EnumDescriptor {
-            file_set: file_set.clone(),
+            file: file.clone(),
             ty,
         })
     }
 
     /// Gets a reference to the [`FileDescriptor`] this enum type is defined in.
-    pub fn parent_file(&self) -> &FileDescriptor {
-        &self.file_set
+    pub fn parent_file(&self) -> &FileDescriptor<I> {
+        &self.file
     }
 
     /// Gets the parent message type if this enum type is nested inside a another message, or `None` otherwise
-    pub fn parent_message(&self) -> Option<MessageDescriptor> {
+    pub fn parent_message(&self) -> Option<MessageDescriptor<I>> {
         self.enum_ty().parent.map(|ty| MessageDescriptor {
-            file_set: self.file_set.clone(),
+            file: self.file.clone(),
             ty,
         })
     }
@@ -875,13 +937,13 @@ impl EnumDescriptor {
     }
 
     fn enum_ty(&self) -> &EnumDescriptorInner {
-        self.file_set.inner.type_map.get_enum(self.ty)
+        self.file.inner.borrow().type_map.get_enum(self.ty)
     }
 
     fn root_message_ty(&self) -> Option<&MessageDescriptorInner> {
         match self.enum_ty().parent {
             Some(mut curr) => loop {
-                let message = self.file_set.inner.type_map.get_message(curr);
+                let message = self.file.inner.type_map.get_message(curr);
                 if let Some(parent) = message.parent {
                     curr = parent;
                 } else {
@@ -893,7 +955,10 @@ impl EnumDescriptor {
     }
 }
 
-impl fmt::Debug for EnumDescriptor {
+impl<I> fmt::Debug for EnumDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner> + Clone,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EnumDescriptor")
             .field("name", &self.name())
@@ -904,14 +969,28 @@ impl fmt::Debug for EnumDescriptor {
     }
 }
 
-impl EnumValueDescriptor {
+impl<I> PartialEq for EnumDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner>,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.file == other.file && self.ty == other.ty
+    }
+}
+
+impl<I> Eq for EnumDescriptor<I> where I: Borrow<FileDescriptorInner> {}
+
+impl<I> EnumValueDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner> + Clone,
+{
     /// Gets a reference to the [`FileDescriptor`] this enum value is defined in.
-    pub fn parent_file(&self) -> &FileDescriptor {
+    pub fn parent_file(&self) -> &FileDescriptor<I> {
         self.parent.parent_file()
     }
 
     /// Gets a reference to the [`EnumDescriptor`] this enum value is defined in.
-    pub fn parent_enum(&self) -> &EnumDescriptor {
+    pub fn parent_enum(&self) -> &EnumDescriptor<I> {
         &self.parent
     }
 
@@ -935,7 +1014,10 @@ impl EnumValueDescriptor {
     }
 }
 
-impl fmt::Debug for EnumValueDescriptor {
+impl<I> fmt::Debug for EnumValueDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner> + Clone,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EnumValueDescriptor")
             .field("name", &self.number())
@@ -945,14 +1027,28 @@ impl fmt::Debug for EnumValueDescriptor {
     }
 }
 
-impl OneofDescriptor {
+impl<I> PartialEq for EnumValueDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner>,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.parent == other.parent && self.number == other.number
+    }
+}
+
+impl<I> Eq for EnumValueDescriptor<I> where I: Borrow<FileDescriptorInner> {}
+
+impl<I> OneofDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner> + Clone,
+{
     /// Gets a reference to the [`FileDescriptor`] this oneof is defined in.
-    pub fn parent_file(&self) -> &FileDescriptor {
+    pub fn parent_file(&self) -> &FileDescriptor<I> {
         self.message.parent_file()
     }
 
     /// Gets a reference to the [`MessageDescriptor`] this message is defined in.
-    pub fn parent_message(&self) -> &MessageDescriptor {
+    pub fn parent_message(&self) -> &MessageDescriptor<I> {
         &self.message
     }
 
@@ -967,12 +1063,13 @@ impl OneofDescriptor {
     }
 
     /// Gets an iterator yielding a [`FieldDescriptor`] for each field of the parent message this oneof contains.
-    pub fn fields(&self) -> impl ExactSizeIterator<Item = FieldDescriptor> + '_ {
-        self.oneof_ty()
+    pub fn fields(&self) -> impl ExactSizeIterator<Item = FieldDescriptor<I>> {
+        let this = self.clone();
+        this.oneof_ty()
             .fields
             .iter()
             .map(move |&field| FieldDescriptor {
-                message: self.message.clone(),
+                message: this.message.clone(),
                 field,
             })
     }
@@ -982,7 +1079,10 @@ impl OneofDescriptor {
     }
 }
 
-impl fmt::Debug for OneofDescriptor {
+impl<I> fmt::Debug for OneofDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner> + Clone,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OneofDescriptor")
             .field("name", &self.name())
@@ -991,6 +1091,17 @@ impl fmt::Debug for OneofDescriptor {
             .finish()
     }
 }
+
+impl<I> PartialEq for OneofDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner>,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.message == other.message && self.index == other.index
+    }
+}
+
+impl<I> Eq for OneofDescriptor<I> where I: Borrow<FileDescriptorInner> {}
 
 impl TypeMap {
     pub fn new() -> Self {
@@ -1142,7 +1253,7 @@ impl TypeId {
         }
     }
 
-    fn to_kind(self, file_set: &FileDescriptor) -> Kind {
+    fn to_kind<I>(self, file_set: &FileDescriptor<I>) -> Kind<I> {
         match self.0 {
             field_descriptor_proto::Type::Double => Kind::Double,
             field_descriptor_proto::Type::Float => Kind::Float,
@@ -1160,12 +1271,12 @@ impl TypeId {
             field_descriptor_proto::Type::String => Kind::String,
             field_descriptor_proto::Type::Bytes => Kind::Bytes,
             field_descriptor_proto::Type::Enum => Kind::Enum(EnumDescriptor {
-                file_set: file_set.clone(),
+                file: file_set.clone(),
                 ty: self,
             }),
             field_descriptor_proto::Type::Group | field_descriptor_proto::Type::Message => {
                 Kind::Message(MessageDescriptor {
-                    file_set: file_set.clone(),
+                    file: file_set.clone(),
                     ty: self,
                 })
             }

@@ -1,8 +1,8 @@
-use std::fmt;
+use std::{borrow::Borrow, fmt, sync::Arc};
 
 use prost_types::{FileDescriptorProto, MethodDescriptorProto, ServiceDescriptorProto};
 
-use crate::descriptor::debug_fmt_iter;
+use crate::descriptor::{debug_fmt_iter, FileDescriptorInner};
 
 use super::{
     make_full_name, parse_name, parse_namespace, ty, DescriptorError, FileDescriptor,
@@ -10,9 +10,9 @@ use super::{
 };
 
 /// A protobuf service definition.
-#[derive(Clone, PartialEq, Eq)]
-pub struct ServiceDescriptor {
-    file_descriptor: FileDescriptor,
+#[derive(Clone)]
+pub struct ServiceDescriptor<I = Arc<FileDescriptorInner>> {
+    file_descriptor: FileDescriptor<I>,
     index: usize,
 }
 
@@ -22,9 +22,9 @@ pub(super) struct ServiceDescriptorInner {
 }
 
 /// A method definition for a [`ServiceDescriptor`].
-#[derive(Clone, PartialEq, Eq)]
-pub struct MethodDescriptor {
-    service: ServiceDescriptor,
+#[derive(Clone)]
+pub struct MethodDescriptor<I = Arc<FileDescriptorInner>> {
+    service: ServiceDescriptor<I>,
     index: usize,
 }
 
@@ -36,13 +36,16 @@ struct MethodDescriptorInner {
     client_streaming: bool,
 }
 
-impl ServiceDescriptor {
+impl<I> ServiceDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner> + Clone,
+{
     /// Create a new [`ServiceDescriptor`] referencing the service at `index` within the given [`FileDescriptor`].
     ///
     /// # Panics
     ///
     /// Panics if `index` is out-of-bounds.
-    pub fn new(file_descriptor: FileDescriptor, index: usize) -> Self {
+    pub fn new(file_descriptor: FileDescriptor<I>, index: usize) -> Self {
         debug_assert!(index < file_descriptor.services().len());
         ServiceDescriptor {
             file_descriptor,
@@ -56,7 +59,7 @@ impl ServiceDescriptor {
     }
 
     /// Gets a reference to the [`FileDescriptor`] this service is defined in.
-    pub fn parent_file(&self) -> &FileDescriptor {
+    pub fn parent_file(&self) -> &FileDescriptor<I> {
         &self.file_descriptor
     }
 
@@ -78,15 +81,23 @@ impl ServiceDescriptor {
     }
 
     /// Gets an iterator yielding a [`MethodDescriptor`] for each method defined in this service.
-    pub fn methods(&self) -> impl ExactSizeIterator<Item = MethodDescriptor> + '_ {
+    pub fn methods(&self) -> impl ExactSizeIterator<Item = MethodDescriptor<I>> {
+        let this = self.clone();
         (0..self.inner().methods.len()).map(move |index| MethodDescriptor {
-            service: self.clone(),
+            service: this.clone(),
             index,
         })
     }
 
+    pub fn borrow(&self) -> ServiceDescriptor<&'_ FileDescriptorInner> {
+        ServiceDescriptor {
+            file_descriptor: self.file_descriptor.borrow(),
+            index: self.index,
+        }
+    }
+
     fn inner(&self) -> &ServiceDescriptorInner {
-        &self.parent_file().inner.services[self.index]
+        &self.parent_file().inner.borrow().services[self.index]
     }
 }
 
@@ -114,7 +125,10 @@ impl ServiceDescriptorInner {
     }
 }
 
-impl fmt::Debug for ServiceDescriptor {
+impl<I> fmt::Debug for ServiceDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner> + Clone,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ServiceDescriptor")
             .field("name", &self.name())
@@ -125,13 +139,27 @@ impl fmt::Debug for ServiceDescriptor {
     }
 }
 
-impl MethodDescriptor {
+impl<I> PartialEq for ServiceDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner>,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.file_descriptor == other.file_descriptor && self.index == other.index
+    }
+}
+
+impl<I> Eq for ServiceDescriptor<I> where I: Borrow<FileDescriptorInner> {}
+
+impl<I> MethodDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner> + Clone,
+{
     /// Create a new [`MethodDescriptor`] referencing the method at `index` within the [`ServiceDescriptor`].
     ///
     /// # Panics
     ///
     /// Panics if `index` is out-of-bounds.
-    pub fn new(service: ServiceDescriptor, index: usize) -> Self {
+    pub fn new(service: ServiceDescriptor<I>, index: usize) -> Self {
         debug_assert!(index < service.methods().len());
         MethodDescriptor { service, index }
     }
@@ -142,12 +170,12 @@ impl MethodDescriptor {
     }
 
     /// Gets a reference to the [`ServiceDescriptor`] this method is defined in.
-    pub fn parent_service(&self) -> &ServiceDescriptor {
+    pub fn parent_service(&self) -> &ServiceDescriptor<I> {
         &self.service
     }
 
     /// Gets a reference to the [`FileDescriptor`] this method is defined in.
-    pub fn parent_file(&self) -> &FileDescriptor {
+    pub fn parent_file(&self) -> &FileDescriptor<I> {
         self.service.parent_file()
     }
 
@@ -162,12 +190,12 @@ impl MethodDescriptor {
     }
 
     /// Gets the [`MessageDescriptor`] for the input type of this method.
-    pub fn input(&self) -> MessageDescriptor {
+    pub fn input(&self) -> MessageDescriptor<I> {
         MessageDescriptor::new(self.parent_file().clone(), self.inner().request_ty)
     }
 
     /// Gets the [`MessageDescriptor`] for the output type of this method.
-    pub fn output(&self) -> MessageDescriptor {
+    pub fn output(&self) -> MessageDescriptor<I> {
         MessageDescriptor::new(self.parent_file().clone(), self.inner().response_ty)
     }
 
@@ -179,6 +207,13 @@ impl MethodDescriptor {
     /// Returns `true` if the server streams multiple messages.
     pub fn is_server_streaming(&self) -> bool {
         self.inner().server_streaming
+    }
+
+    pub fn borrow(&self) -> MethodDescriptor<&'_ FileDescriptorInner> {
+        MethodDescriptor {
+            service: self.service.borrow(),
+            index: self.index,
+        }
     }
 
     fn inner(&self) -> &MethodDescriptorInner {
@@ -207,7 +242,10 @@ impl MethodDescriptorInner {
     }
 }
 
-impl fmt::Debug for MethodDescriptor {
+impl<I> fmt::Debug for MethodDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner> + Clone,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MethodDescriptor")
             .field("name", &self.name())
@@ -220,3 +258,14 @@ impl fmt::Debug for MethodDescriptor {
             .finish()
     }
 }
+
+impl<I> PartialEq for MethodDescriptor<I>
+where
+    I: Borrow<FileDescriptorInner>,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.service == other.service && self.index == other.index
+    }
+}
+
+impl<I> Eq for MethodDescriptor<I> where I: Borrow<FileDescriptorInner> {}

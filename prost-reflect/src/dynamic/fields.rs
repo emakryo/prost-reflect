@@ -10,14 +10,14 @@ use crate::{
 
 use super::unknown::UnknownField;
 
-pub(super) trait FieldDescriptorLike: fmt::Debug {
+pub(super) trait FieldDescriptorLike<I>: fmt::Debug {
     fn number(&self) -> u32;
     fn default_value(&self) -> Value;
     fn is_default_value(&self, value: &Value) -> bool;
     fn is_valid(&self, value: &Value) -> bool;
-    fn containing_oneof(&self) -> Option<OneofDescriptor>;
+    fn containing_oneof(&self) -> Option<OneofDescriptor<I>>;
     fn supports_presence(&self) -> bool;
-    fn kind(&self) -> Kind;
+    fn kind(&self) -> Kind<I>;
     fn is_group(&self) -> bool;
     fn is_list(&self) -> bool;
     fn is_map(&self) -> bool;
